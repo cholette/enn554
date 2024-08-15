@@ -1,0 +1,6 @@
+data/
+private/
+sam/
+.venv/
+outputs/
+*__pycache__/*
