@@ -3,4 +3,4 @@ private/
 sam/
 .venv/
 outputs/
-*__pycache__/*
+*__pycache__*

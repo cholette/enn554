@@ -204,10 +204,10 @@ class parabolic_trough_1D_transient:
             D = self.envelope['diameter_outer']
         
         mu = PropsSI('viscosity','T',T_film,'P',air_pressure,'Air')
+        rho = PropsSI('D','T',T_film,'P',air_pressure,'Air')
         if wind_speed<0.1: # m/s
             Pr_film = PropsSI('Prandtl','T',T_film,'P',air_pressure,'Air')
             β = PropsSI('isobaric_expansion_coefficient','T',T_film,'P',air_pressure,'Air')
-            rho = PropsSI('D','T',T_film,'P',air_pressure,'Air')
             k = PropsSI('conductivity','T',T_film,'P',air_pressure,'Air')
             cp = PropsSI('C','T',T_film,'P',air_pressure,'Air')
             α = k/rho/cp
@@ -215,11 +215,11 @@ class parabolic_trough_1D_transient:
             
             RaD = g*β*D**3*(T_object-T_fluid)/(α*v)
             den = (1+ (0.559/Pr_film)**(9/16))**(16/9)
-            Nu = 0.6 + 0.387*(RaD/den)**2
+            Nu = (0.6 + 0.387*(RaD/den)**(1/6) )**2
         else:
             Pr_e = PropsSI('Prandtl','T',T_object,'P',air_pressure,'Air')
             Pr_ambient = PropsSI('Prandtl','T',T_fluid,'P',air_pressure,'Air')
-            ReD = wind_speed * D / mu
+            ReD = rho * wind_speed * D / mu
 
             if (Pr_ambient < 0.7) or (Pr_ambient>500):
                 print('Warning: Prandtl number if outside the range of validity in the Nu computation.')
@@ -266,14 +266,14 @@ class parabolic_trough_1D_transient:
         L_hce = self.collector['hce_length']
         kb = self.bracket['conductivity']
         D = self.bracket['effective_diameter']
-        T_bracket = (T_base + T_ambient)/3.0
+        T_bracket = (T_base-273.16 + T_ambient-273.15)/3.0 + 273.15
         T_film = 0.5*(T_bracket+T_ambient)
         k = PropsSI('conductivity','T',T_film,'P',air_pressure,'Air')
 
         Nu = self.nusselt_number(T_bracket,T_ambient,wind_speed,D=D)
         hb = k*Nu/D
 
-        return n_brackets*sqrt(hb*Pb*kb*Ab) * (T_base-T_ambient)/L_hce
+        return n_brackets*sqrt(hb*Pb*kb*Ab) * (T_base-T_ambient)
 
     def solar_heating_rates(self,DNI,η_opt):
         
@@ -313,6 +313,7 @@ class parabolic_trough_1D_transient:
         # partition
         N_hce = self.collector['number_of_hce']
         L_hce = self.collector['hce_length']
+        L_aperture = L_hce*N_hce
         element_edges = linspace(0,L_hce*N_hce,N_elements+1)
         element_centers = element_edges[0:-1] + 0.5*diff(element_edges)
         Δz = element_edges[1]-element_edges[0]
