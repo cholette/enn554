@@ -1,1 +1,1 @@
-You will need to create data/ and outputs/ folders locally --- the former is to old input files (e.g parameter files, TMY files) while the outputs/ folder is for dumping any code outputs that need to be saved (jsons, output spreadsheets).
+You will need to create data/ and outputs/ folders locally --- the former is to hold input files (e.g parameter files, TMY files) while the outputs/ folder is for dumping any code outputs that need to be saved (jsons, output spreadsheets).
