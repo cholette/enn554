@@ -55,17 +55,22 @@ def compute_solar_angles(standard_clock_time: datetime,φ,L,L_tz,force_south_as_
     γ = np.sign(ω) * np.abs( acosd( (cosd(θ)*sind(φ) - sind(δ))/(sind(θ)*cosd(φ)) ) )
 
     if (φ < 0) and (not force_south_as_zero): # southern hemisphere and convention is not forced to use south as zero
-        if γ<0: # east of north
-            γ = -180 - γ 
-        else: # west of north
-            γ = 180 - γ
         azimuth_zero = "North" # set azimuth zero to N
+        γ = _set_azimuth_zero_to_north(γ)
 
     return {"zenith":θ, 
             "azimuth":γ,
             "declination":δ, 
             "solar_time": t_solar,
             "azimuth_zero":azimuth_zero}
+
+def _set_azimuth_zero_to_north(γ):
+    if γ<0: # east of north
+        γ = -180 - γ 
+    else: # west of north
+        γ = 180 - γ
+    
+    return γ
 
 def _all_sun_angles(dt0, hour_grid, doy_grid,φ,L,L_tz,force_south_as_zero=False,ignore_leapday=False,location_name=""):
     zeniths = np.zeros( (len(doy_grid),len(hour_grid)) )
@@ -222,9 +227,8 @@ def sun_path_3d(dt0, hour_grid, doy_grid,φ,L,L_tz,
                     angle=angle_slider,
                     elev=elev_slider)
     return intp
-    
+
 def solar_vector_from_angles(γ_s,θ_zenith,convention='sam'):
-    
     g,z = γ_s,θ_zenith
     assert convention.lower() in ['soltrace','sam'], "Convention must be either soltrace or sam"
 
@@ -234,6 +238,9 @@ def solar_vector_from_angles(γ_s,θ_zenith,convention='sam'):
     elif convention.lower() == 'sam':
         # x-east, y-north, z-zenith. See SAM manual 3D Shade Calculator for more on this
         return np.array([sind(z)*sind(-g),-sind(z)*cosd(-g),cosd(z)])
+
+def angle_of_incidence(θ_z,γ_s,β,γ):
+    return np.arccos(cosd(θ_z)*cosd(β) + sind(θ_z)*sind(β)*cosd(γ_s-γ))
 
 def plane_of_array_irradiance(standard_clock_time,DNI,GHI,φ,L,L_tz,β,γ,
                               ρ=0,model="ISM",θ_z_max=90,

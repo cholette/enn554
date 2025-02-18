@@ -16,7 +16,6 @@ def levelized_cost_of_electricity(E,CAPEX,OPEX,r=0.08):
 
     return NPV_costs/NPV_gen
 
-
 def read_TMY(file):
     metadata = {}
     with open(file) as csvfile:
