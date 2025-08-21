@@ -4,3 +4,5 @@ sam/
 .venv/
 outputs/
 *__pycache__*
+matlab/
+docs/
