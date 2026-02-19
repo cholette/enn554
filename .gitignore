@@ -6,3 +6,4 @@ outputs/
 *__pycache__*
 matlab/
 docs/
+*.egg-info/

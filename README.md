@@ -1,11 +1,14 @@
-# enn554
+# ENN554
 Code for ENN554 Design of Renewable Energy Production Systems
+
+# Installation
+
 
 # Summary
 This repository provides companion code for the unit and includes Python and MATLAB utilities for the tutorials and lecture content. The Python library currently includes:
 - `sun.py` --- a class for computing sun position using standard equations. 
 - `parabolic_trough.py` --- a class for thermal modelling of parabolic trough collectors. Includes a dynamic model that is a synthesis of state-of-the art models. 
-- `wind.py` --- a class for basic analysis of wind speed data and the annual energy production of wind turbines using power curves. 
+- `wind.py` --- a class for basic analysis of wind speed data and the annual energy production of wind turbines using power curves
 -`collector_geometry.py` --- a currently very incomplete set of methods for computing surface normals and view factors. 
 - `utilties.py` --- a set of general use utilities (e.g. for reading in TMY files).
 
