@@ -296,7 +296,7 @@ class speed_and_direction_dist:
         return np.sum([self.probabilities[ii]*(d.var()+d.mean()**2) for ii,d in enumerate(self.dists)]) - self.mean()**2  # see https://en.wikipedia.org/wiki/Mixture_distribution#Moments 
 
     def ppf(self,p):
-        return fsolve(lambda x: self.cdf(x)-p,self.mean())
+        return fsolve(lambda x: self.cdf(x)-p,self.mean_speed())
 
     def fit(self,direction,speed,az_edges=None, plot=False,hist_kwargs={},fit_kwargs={},handles=None):
         # data is [direction,speed]

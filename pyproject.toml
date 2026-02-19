@@ -35,6 +35,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
+    "xlrd",
     "matplotlib>=3.7",
     "scipy>=1.10",
     "CoolProp>=6.6",
@@ -50,7 +51,8 @@ dependencies = [
     "cartopy",
     "shapely",
     "geopandas",
-    "pysolar"
+    "pysolar",
+    "openpyxl"
 ]
 
 # -------- Optional environments --------
@@ -62,7 +64,6 @@ notebooks = [
     "ipykernel>=6.0",
     "ipython>=8.0",
     "ipywidgets>=8.0",
-    "sympy"
 ]
 
 

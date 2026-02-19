@@ -42,7 +42,7 @@ def equation_of_time(doy):
 
 def solar_time(t,L_tz,L_loc,ignore_leapday=False):
     doy = get_day_of_year(t,ignore_leapday=ignore_leapday)
-    st = t + timedelta(minutes = 4*(L_tz-L_loc) + E)
+    st = t + timedelta(minutes = 4*(L_tz-L_loc) + equation_of_time(doy))
     return st
 
 def compute_solar_angles(standard_clock_time: datetime,φ,L,L_tz,force_south_as_zero=False,ignore_leapday=False):
