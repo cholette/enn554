@@ -7,3 +7,5 @@ outputs/
 matlab/
 docs/
 *.egg-info/
+*.egg
+*.ipynb_checkpoints/
