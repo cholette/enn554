@@ -243,26 +243,31 @@ def solar_vector_from_angles(γ_s,θ_zenith,convention='sam'):
 def angle_of_incidence(θ_z,γ_s,β,γ):
     return np.arccos(cosd(θ_z)*cosd(β) + sind(θ_z)*sind(β)*cosd(γ_s-γ))
 
-def plane_of_array_irradiance(standard_clock_time,DNI,GHI,φ,L,L_tz,β,γ,
+def plane_of_array_irradiance(standard_clock_times,DNI,GHI,φ,L,L_tz,β,γ,
                               ρ=0,model="ISM",θ_z_max=90,
-                              clip_negative=False,
+                              clip_aoi_greater_than_90=False,
                               ignore_leapday=False):
     
-    sun_pos = compute_solar_angles(standard_clock_time,φ,L,L_tz,force_south_as_zero=True,ignore_leapday=ignore_leapday)
-    θ_z,γ_s = sun_pos['zenith'],sun_pos['azimuth']
-    cAOI = cosd(θ_z)*cosd(β) + sind(θ_z)*sind(β)*cosd(γ_s-γ)
-    DHI = GHI-DNI*cosd(θ_z)
+    assert len(DNI) == len(GHI), "times, DNI, and GHI must be the same length"
+    assert len(standard_clock_times) == len(GHI), "times, DNI, and GHI must be the same length"
+    G_POA = []
+    for ii,t in enumerate(standard_clock_times):
+        sun_pos = compute_solar_angles(t,φ,L,L_tz,force_south_as_zero=True,ignore_leapday=ignore_leapday)
+        θ_z,γ_s = sun_pos['zenith'],sun_pos['azimuth']
+        cAOI = cosd(θ_z)*cosd(β) + sind(θ_z)*sind(β)*cosd(γ_s-γ)
+        DHI = GHI[ii]-DNI[ii]*cosd(θ_z)
 
-    if model.lower()=="ism":
-        if θ_z < θ_z_max: # sun is above horizon
-            G_POA = DNI*cAOI + DHI*0.5*(1+cosd(β)) + ρ*GHI*0.5*(1-cosd(β))
+        if model.lower()=="ism":
+            if θ_z < θ_z_max: # sun is above horizon
+                g = DNI[ii]*cAOI + DHI*0.5*(1+cosd(β)) + ρ*GHI[ii]*0.5*(1-cosd(β))
+            else:
+                g = 0 
         else:
-            G_POA = 0 
-    else:
-        raise ValueError("Model must be ISM for now.")
+            raise ValueError("Model must be ISM for now.")
 
-    if clip_negative:
-        if G_POA < 0.0:
-            G_POA = 0.0
-    
-    return G_POA,sun_pos
+        if clip_aoi_greater_than_90 and cAOI < 0.0:
+            g = 0.0
+        
+        G_POA.append(g)
+        
+    return G_POA
