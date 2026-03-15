@@ -14,6 +14,34 @@ import csv
 # [1] Wind Energy Explained, 1st ed. John Wiley & Sons, Ltd, 2009. doi: 10.1002/9781119994367.
 
 class merra_wind_speed_data:
+    """Container for MERRA-2 reanalysis wind data downloaded from NASA POWER.
+
+    Imports single-point CSV exports from the NASA POWER Data Access Viewer and
+    provides methods to extrapolate wind speed to arbitrary hub heights, fit
+    wind profile parameters, and export data in SAM-compatible format.
+
+    Typical MERRA-2 columns after import:
+        ``WS10M``, ``WS50M`` – wind speed at 10 m and 50 m (m/s)
+        ``WD10M``, ``WD50M`` – wind direction at 10 m and 50 m (degrees)
+        ``PS``               – surface pressure (kPa in raw data)
+        ``T2M``              – air temperature at 2 m (°C)
+
+    Attributes
+    ----------
+    data_source_url : str
+        URL of the NASA POWER data access viewer.
+    latitude : float or None
+        Site latitude in degrees (positive north).
+    longitude : float or None
+        Site longitude in degrees (positive east of Greenwich).
+    date_range : str or None
+        Date range string parsed from the CSV header.
+    average_elevation : str or None
+        Site elevation string parsed from the CSV header.
+    data : pandas.DataFrame or None
+        Imported time-series data with a ``Timestamp`` column.
+    """
+
     def __init__(self):
         self.data_source_url = "https://power.larc.nasa.gov/data-access-viewer/"
         self.latitude = None
@@ -23,6 +51,23 @@ class merra_wind_speed_data:
         self.data = None
 
     def import_data(self,merra_single_point_csv):
+        """Import a MERRA-2 single-point CSV file exported from NASA POWER.
+
+        Parses the custom NASA POWER header (lines up to and including
+        ``-END HEADER-``) to extract site metadata, then reads the remaining
+        rows as a time-series DataFrame with a ``Timestamp`` column.
+
+        Parameters
+        ----------
+        merra_single_point_csv : str or path-like
+            Path to the NASA POWER CSV export file.
+
+        Returns
+        -------
+        None
+            Populates ``self.latitude``, ``self.longitude``,
+            ``self.average_elevation``, and ``self.data`` in place.
+        """
         file = merra_single_point_csv
         
         # read header
@@ -67,6 +112,39 @@ class merra_wind_speed_data:
                         alpha=None,
                         model="power_law",
                         plot=False):
+        """Extrapolate wind speed from 50 m to one or more target heights.
+
+        Uses either the power law or the logarithmic wind profile model.
+        If the required profile parameter (``alpha`` or ``z0``) is not
+        supplied it is fitted automatically from the 10 m and 50 m data
+        already present in ``self.data``.
+
+        New columns are added to ``self.data`` using the naming convention
+        ``WS{height}M`` and ``WD{height}M``. Wind direction at the new
+        height is approximated as the circular mean of the 10 m and 50 m
+        directions.
+
+        Parameters
+        ----------
+        heights : list of int or int
+            Target height(s) in metres.
+        z0 : float or None, optional
+            Surface roughness length in metres (logarithmic model only).
+            If None, ``fit_logarithmic`` is called automatically.
+        alpha : float or None, optional
+            Power law exponent (power law model only).
+            If None, ``fit_power_law`` is called automatically.
+        model : {'power_law', 'logarithmic'}, optional
+            Wind profile model to use. Default is ``'power_law'``.
+        plot : bool, optional
+            If True, plot the fitted profile against the 10 m vs 50 m data.
+            Default is False.
+
+        Returns
+        -------
+        None
+            Modifies ``self.data`` in place.
+        """
 
         assert model.lower() in ['power_law','logarithmic'], 'Invalid model. Must be "power_law" or "logarithmic"'
         
@@ -116,6 +194,17 @@ class merra_wind_speed_data:
             ax.legend()
     
     def fit_power_law(self):
+        """Fit the power law exponent α to the 10 m and 50 m wind speed data.
+
+        Minimises the residual sum of squares between the measured 10 m wind
+        speeds and those predicted from 50 m using the power law. Optimisation
+        is performed in log-space (over ``log_alpha``) to guarantee α > 0.
+
+        Returns
+        -------
+        float
+            Fitted power law exponent α (dimensionless).
+        """
         ws10,ws50= self.data['WS10M'], self.data['WS50M']
         rss = lambda log_alpha: np.sum((ws10 - power_law(ws50,50,10,np.exp(log_alpha)) )**2)
         alpha = np.exp(minimize_scalar(rss)['x'])
@@ -123,6 +212,18 @@ class merra_wind_speed_data:
         return alpha
     
     def fit_logarithmic(self):
+        """Fit the surface roughness length z₀ to the 10 m and 50 m wind speed data.
+
+        Minimises the residual sum of squares between the measured 10 m wind
+        speeds and those predicted from 50 m using the logarithmic profile.
+        Optimisation is performed in log-space (over ``log_z0``) to guarantee
+        z₀ > 0.
+
+        Returns
+        -------
+        float
+            Fitted surface roughness length z₀ in metres.
+        """
         ws10,ws50= self.data['WS10M'], self.data['WS50M']
         rss = lambda log_z0: np.sum((ws10 - logarithmic(ws50,50,10,np.exp(log_z0)) )**2)
         z0 = np.exp(minimize_scalar(rss)['x'])
@@ -130,7 +231,37 @@ class merra_wind_speed_data:
         return z0
     
     def export_to_sam_csv(self,site_timezone,filename:str):
-        # See SAM CSV Format for Wind for more details on format. 
+        """Export the wind data to a SAM-compatible CSV file.
+
+        Writes a single-row header followed by the time-series data in the
+        format expected by NREL's System Advisor Model (SAM) wind resource
+        CSV format. Column names are converted to SAM conventions, e.g.
+        ``WS80M`` → ``wind speed at 80m (m/s)``.
+
+        Two assumptions are made and printed as runtime warnings:
+
+        * Surface pressure (``PS``) is labelled as measured at 10 m even
+          though MERRA-2 does not provide a height-resolved pressure field.
+        * Air temperature uses the 2 m value (``T2M``) as a proxy for 10 m.
+
+        Unit conversions applied:
+
+        * Pressure: kPa → Pa (multiply by 1000).
+
+        Parameters
+        ----------
+        site_timezone : str
+            Timezone string understood by pandas / pytz (e.g. ``'Australia/Brisbane'``).
+            Written to both ``Site Timezone`` and ``Data Timezone`` header fields.
+        filename : str or path-like
+            Output file path for the SAM CSV.
+
+        Returns
+        -------
+        None
+            Writes the file to disk.
+        """
+        # See SAM CSV Format for Wind for more details on format.
 
         # header
         row1 = ['Site Timezone',site_timezone,
@@ -168,12 +299,90 @@ class merra_wind_speed_data:
             df2.to_csv(f,header=True,index=False)        
 
 def power_law(ws,height,new_height,alpha):
+    """Extrapolate wind speed to a new height using the power law profile.
+
+    ws_new = ws · (new_height / height)^alpha
+
+    Assumes neutral atmospheric stability. A typical value of alpha for
+    open terrain is 1/7 ≈ 0.143.
+
+    Parameters
+    ----------
+    ws : float or array-like
+        Wind speed at the reference height (m/s).
+    height : float
+        Reference measurement height (m).
+    new_height : float
+        Target height (m).
+    alpha : float
+        Power law wind shear exponent (dimensionless).
+
+    Returns
+    -------
+    float or ndarray
+        Wind speed at *new_height* (m/s).
+    """
     return ws * (new_height/height)**alpha
 
 def logarithmic(ws,height,new_height,z0):
+    """Extrapolate wind speed to a new height using the logarithmic wind profile.
+
+    ws_new = ws · ln(new_height / z0) / ln(height / z0)
+
+    Assumes neutral atmospheric stability and that both *height* and
+    *new_height* are well above the roughness sublayer.
+
+    Parameters
+    ----------
+    ws : float or array-like
+        Wind speed at the reference height (m/s).
+    height : float
+        Reference measurement height (m). Must be greater than *z0*.
+    new_height : float
+        Target height (m). Must be greater than *z0*.
+    z0 : float
+        Aerodynamic surface roughness length (m). Typical values range from
+        ~0.0002 m (open sea) to ~1 m (urban areas).
+
+    Returns
+    -------
+    float or ndarray
+        Wind speed at *new_height* (m/s).
+    """
     return ws * log(new_height/z0)/log(height/z0)
     
 def speed_fit(data,plot=False,type='Weibull',hist_kwargs={},fit_kwargs={},handles=None):
+    """Fit a Weibull or Rayleigh distribution to wind speed data.
+
+    The location parameter is fixed at zero (``floc=0``) so the distribution
+    starts at 0 m/s, which is physically appropriate for wind speeds.
+
+    Parameters
+    ----------
+    data : array-like
+        Measured wind speeds (m/s).
+    plot : bool, optional
+        If True, plot a histogram of the data alongside the fitted PDF.
+        Default is False.
+    type : {'Weibull', 'Rayleigh'}, optional
+        Distribution family to fit. Case-insensitive. Default is ``'Weibull'``.
+    hist_kwargs : dict, optional
+        Keyword arguments forwarded to ``matplotlib.axes.Axes.hist``.
+    fit_kwargs : dict, optional
+        Keyword arguments forwarded to the PDF line plot.
+    handles : tuple of (Figure, Axes) or None, optional
+        Existing matplotlib figure and axes to plot onto. If None and
+        *plot* is True, a new figure is created. Ignored when *plot* is False.
+
+    Returns
+    -------
+    dist : scipy.stats frozen distribution
+        Fitted Weibull or Rayleigh distribution object.
+    fig : matplotlib.figure.Figure
+        Only returned when *plot* is True.
+    ax : matplotlib.axes.Axes
+        Only returned when *plot* is True.
+    """
     
     assert type.lower() is not None, 'Must provide a distribution type'
     assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be "weibull" or "rayleigh'
@@ -207,6 +416,38 @@ def speed_fit(data,plot=False,type='Weibull',hist_kwargs={},fit_kwargs={},handle
         return dist
 
 def change_height(dist,height_old,height_new,alpha,type='weibull'):
+    """Scale a wind speed distribution to a new hub height using the power law.
+
+    Only the scale parameter of the distribution is modified; the shape
+    parameter (which characterises the spread of wind speeds) is assumed to
+    be height-independent.
+
+    new_scale = old_scale · (height_new / height_old)^alpha
+
+    Parameters
+    ----------
+    dist : scipy.stats frozen distribution
+        Wind speed distribution at *height_old*. Must be a frozen
+        ``weibull_min`` or ``rayleigh`` object.
+    height_old : float
+        Reference height of *dist* (m).
+    height_new : float
+        Target height (m).
+    alpha : float
+        Power law wind shear exponent (dimensionless).
+    type : {'weibull', 'rayleigh'}, optional
+        Distribution family. Case-insensitive. Default is ``'weibull'``.
+
+    Returns
+    -------
+    scipy.stats frozen distribution
+        New frozen distribution of the same family at *height_new*.
+
+    Raises
+    ------
+    ValueError
+        If *type* is not ``'weibull'`` or ``'rayleigh'``.
+    """
     # Modify scale parameter for different height. See notes on wind for details.
     if type.lower() == 'weibull':
         return stats.weibull_min(dist.args[0],scale=dist.kwds['scale']*(height_new/height_old)**alpha)
@@ -216,6 +457,30 @@ def change_height(dist,height_old,height_new,alpha,type='weibull'):
         raise ValueError('Invalid distribution type. Must be "weibull" or "rayleigh')
 
 def wind_rose(direction,speed,num_bins=16,s_units=None):
+    """Plot a wind rose (polar frequency histogram) for wind speed and direction.
+
+    Each bar shows the frequency of winds from that direction sector; bar
+    segments are coloured by wind speed class. Y-axis tick labels show
+    percentage of total observations.
+
+    Parameters
+    ----------
+    direction : array-like
+        Wind directions in degrees. Convention is meteorological (0° = north,
+        90° = east, increasing clockwise).
+    speed : array-like
+        Wind speeds corresponding to each direction measurement (m/s or other
+        units — used for display only).
+    num_bins : int, optional
+        Number of directional sectors. Default is 16 (22.5° per sector).
+    s_units : str or None, optional
+        Unit label shown in the speed legend (e.g. ``'m/s'``). Default is None.
+
+    Returns
+    -------
+    WindroseAxes
+        The matplotlib-compatible axes object containing the wind rose plot.
+    """
     ax = WindroseAxes.from_ax()
     ax.bar(direction,speed,nsector=num_bins,normed=True)
     ax.set_yticklabels([f"{a:.2f}%" for a in ax.get_yticks()])
@@ -223,6 +488,39 @@ def wind_rose(direction,speed,num_bins=16,s_units=None):
     return ax
 
 def power_cdf(dist,power_curve,n_bins=10,power_units='W'):
+    """Compute the cumulative distribution function of turbine power output.
+
+    Discretises the wind speed distribution into *n_bins* equally spaced
+    bins up to the 99.9th-percentile wind speed, maps each bin to a power
+    value via the turbine power curve, then assembles the CDF of power output.
+
+    Duplicate power values (e.g. multiple wind speed bins that map to rated
+    power) are collapsed by retaining only the maximum probability for each
+    unique power level.
+
+    The returned arrays are prepended with ``(-1, 0)`` so that the CDF can be
+    plotted starting from zero probability (a conventional CDF plotting
+    convenience).
+
+    Parameters
+    ----------
+    dist : scipy.stats frozen distribution
+        Wind speed probability distribution.
+    power_curve : turbine
+        Turbine object with a ``get_power(wind_speed, power_units=...)`` method.
+    n_bins : int, optional
+        Number of wind speed bins for discretisation. Default is 10.
+    power_units : {'W', 'kW', 'MW'}, optional
+        Units for the returned power values. Default is ``'W'``.
+
+    Returns
+    -------
+    power : ndarray
+        Unique power values prepended with -1, in *power_units*.
+    probability : ndarray
+        CDF values (cumulative probability) corresponding to each power value,
+        prepended with 0.
+    """
     wmax = dist.ppf(0.999)
     w = np.linspace(0,wmax,n_bins+1)
     prob_w = dist.cdf(w)
@@ -235,7 +533,31 @@ def power_cdf(dist,power_curve,n_bins=10,power_units='W'):
 
     return np.r_[-1,power],np.r_[0,prob]
 class speed_and_direction_dist:
-    def __init__(self,type=None,shapes=[],scales=[],n_az_bins=[],probabilities=[]):
+    """Joint wind speed and direction distribution modelled as a directional mixture.
+
+    The full distribution is represented as a mixture of per-sector wind speed
+    distributions (one per azimuth bin), each weighted by the probability that
+    the wind comes from that sector.
+
+    Azimuth convention: bins span [0°, 360°) with 0° = north, increasing
+    clockwise (meteorological convention). The first bin edge is at −dθ/2 so
+    that 0° falls at the centre of the first bin.
+
+    Parameters
+    ----------
+    type : {'weibull', 'rayleigh'}
+        Distribution family for each directional sector.
+    shapes : list of float
+        Weibull shape parameters (k) for each sector. Must be empty for Rayleigh.
+    scales : list of float
+        Scale parameters (λ) for each sector (m/s).
+    n_az_bins : int
+        Number of equally spaced azimuth sectors.
+    probabilities : list of float
+        Probability weight for each sector. Should sum to 1.
+    """
+
+    def __init__(self,type=None,shapes=[],scales=[],n_az_bins=None,probabilities=[]):
 
         assert type is not None, 'Must provide a distribution type'
         assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be "weibull" or "rayleigh'
@@ -256,9 +578,39 @@ class speed_and_direction_dist:
         self.type = type.lower()
 
     def set_height(self,height):
+        """Record the reference height of the wind speed distributions.
+
+        Must be called before ``change_height`` so the scaling factor can be
+        computed correctly.
+
+        Parameters
+        ----------
+        height : float
+            Height in metres at which the distributions were fitted.
+        """
         self.height = height
 
     def change_height(self,new_height,alpha):
+        """Scale all directional sector distributions to a new height in place.
+
+        Uses the power law to adjust the scale parameter of each sector's
+        distribution. Currently only implemented for Weibull distributions;
+        Rayleigh sectors are silently skipped.
+
+        ``set_height`` must be called before this method.
+
+        Parameters
+        ----------
+        new_height : float
+            Target hub height (m).
+        alpha : float
+            Power law wind shear exponent (dimensionless).
+
+        Returns
+        -------
+        None
+            Modifies ``self.dists`` in place.
+        """
         assert self.height is not None, 'Must set height of the original data using set_height()'
         
         p = self.probabilities
@@ -267,6 +619,24 @@ class speed_and_direction_dist:
                 self.dists[ii] = change_height(d,self.height,new_height,alpha,self.type)
 
     def rvs(self,N=1):
+        """Draw random (direction, speed) samples from the joint distribution.
+
+        First samples a directional sector from the multinomial defined by
+        ``self.probabilities``, then draws a wind speed from the corresponding
+        sector's distribution.
+
+        Parameters
+        ----------
+        N : int, optional
+            Number of samples to draw. Default is 1.
+
+        Returns
+        -------
+        directions : ndarray, shape (N,)
+            Sampled wind directions in degrees (azimuth bin centres).
+        speeds : ndarray, shape (N,)
+            Sampled wind speeds in m/s.
+        """
         rng = np.random.default_rng()
         direction_bin = rng.choice(len(self.probabilities),size=N,p=self.probabilities,replace=True)
         speeds = np.array([self.dists[ii].rvs() for ii in direction_bin])
@@ -274,6 +644,18 @@ class speed_and_direction_dist:
         return directions,speeds
     
     def get_params(self):
+        """Extract fitted parameters from all directional sector distributions.
+
+        Returns
+        -------
+        probabilities : ndarray, shape (n_sectors,)
+            Sector probability weights.
+        scales : ndarray, shape (n_sectors,)
+            Scale parameter (λ) of each sector's distribution (m/s).
+        shapes : ndarray, shape (n_sectors,)
+            Shape parameter (k) of each sector's Weibull distribution.
+            For Rayleigh distributions this will be the default args value.
+        """
 
         probs = self.probabilities
         scales,shapes = [],[]
@@ -284,21 +666,120 @@ class speed_and_direction_dist:
         return np.array(probs),np.array(scales),np.array(shapes)
 
     def pdf(self,x):
+        """Evaluate the marginal wind speed probability density function.
+
+        Computes the mixture PDF by summing each sector's PDF weighted by its
+        probability: f(x) = Σᵢ pᵢ · fᵢ(x).
+
+        Parameters
+        ----------
+        x : float or array-like
+            Wind speed(s) at which to evaluate the PDF (m/s).
+
+        Returns
+        -------
+        float or ndarray
+            PDF value(s) at *x*.
+        """
         return np.sum([self.probabilities[ii]*d.pdf(x) for ii,d in enumerate(self.dists)],axis=0)
 
     def cdf(self,x):
+        """Evaluate the marginal wind speed cumulative distribution function.
+
+        Computes the mixture CDF: F(x) = Σᵢ pᵢ · Fᵢ(x).
+
+        Parameters
+        ----------
+        x : float or array-like
+            Wind speed(s) at which to evaluate the CDF (m/s).
+
+        Returns
+        -------
+        float or ndarray
+            CDF value(s) at *x* in [0, 1].
+        """
         return np.sum([self.probabilities[ii]*d.cdf(x) for ii,d in enumerate(self.dists)],axis=0)
     
     def mean_speed(self):
+        """Compute the marginal mean wind speed.
+
+        E[V] = Σᵢ pᵢ · E[Vᵢ]
+
+        Returns
+        -------
+        float
+            Mean wind speed in m/s.
+        """
         return np.sum([self.probabilities[ii]*d.mean() for ii,d in enumerate(self.dists)])
     
     def var(self):
-        return np.sum([self.probabilities[ii]*(d.var()+d.mean()**2) for ii,d in enumerate(self.dists)]) - self.mean()**2  # see https://en.wikipedia.org/wiki/Mixture_distribution#Moments 
+        """Compute the marginal variance of wind speed.
+
+        Uses the law of total variance for mixture distributions:
+        Var[V] = Σᵢ pᵢ · (Var[Vᵢ] + E[Vᵢ]²) − E[V]²
+
+        See https://en.wikipedia.org/wiki/Mixture_distribution#Moments
+
+        Returns
+        -------
+        float
+            Variance of wind speed in (m/s)².
+        """
+        return np.sum([self.probabilities[ii]*(d.var()+d.mean()**2) for ii,d in enumerate(self.dists)]) - self.mean_speed()**2  # see https://en.wikipedia.org/wiki/Mixture_distribution#Moments
 
     def ppf(self,p):
+        """Compute the percent point function (inverse CDF) of the wind speed.
+
+        Finds v such that CDF(v) = p using numerical root-finding
+        (``scipy.optimize.fsolve``) with ``mean_speed()`` as the initial guess.
+
+        Parameters
+        ----------
+        p : float
+            Probability level in [0, 1].
+
+        Returns
+        -------
+        ndarray
+            Wind speed (m/s) at which the CDF equals *p*.
+        """
         return fsolve(lambda x: self.cdf(x)-p,self.mean_speed())
 
     def fit(self,direction,speed,az_edges=None, plot=False,hist_kwargs={},fit_kwargs={},handles=None):
+        """Fit per-sector wind speed distributions to observational data.
+
+        Bins wind observations by direction sector, computes sector
+        probabilities from observation counts, and fits a Weibull distribution
+        to the wind speeds within each sector using ``speed_fit``.
+
+        .. warning::
+            This method **appends** to ``self.dists`` without clearing it
+            first. Calling ``fit`` more than once on the same object will
+            duplicate the distributions, producing incorrect results.
+
+        Parameters
+        ----------
+        direction : array-like
+            Observed wind directions in degrees.
+        speed : array-like
+            Observed wind speeds (m/s), aligned with *direction*.
+        az_edges : array-like or None, optional
+            Azimuth bin edges to use instead of those set at construction.
+            Only applied if ``self.azimuth_bin_edges`` is empty.
+        plot : bool, optional
+            Plotting is not yet implemented; reserved for future use.
+        hist_kwargs : dict, optional
+            Reserved for future plotting use.
+        fit_kwargs : dict, optional
+            Reserved for future plotting use.
+        handles : tuple or None, optional
+            Reserved for future plotting use.
+
+        Returns
+        -------
+        None
+            Updates ``self.probabilities`` and ``self.dists`` in place.
+        """
         # data is [direction,speed]
         assert (self.azimuth_bin_edges is not []) or (az_edges is not None), 'Must provide azimuth bin edges either in object or as a keyword argument to the fitting'
 
@@ -318,6 +799,33 @@ class speed_and_direction_dist:
             self.dists.append(d)
 
     def wind_speed_curve(self,x,hours_per_year=8760,plot=True):
+        """Compute (and optionally plot) the wind speed exceedance curve.
+
+        Returns the probability that the wind speed exceeds each value in *x*,
+        and optionally converts this to hours per year.
+
+        R(v) = 1 − CDF(v)
+
+        Parameters
+        ----------
+        x : array-like
+            Wind speeds at which to evaluate the exceedance probability (m/s).
+        hours_per_year : float, optional
+            Number of hours in a year used to scale the x-axis when plotting.
+            Default is 8760 (standard year).
+        plot : bool, optional
+            If True, plot hours-per-year (x-axis) vs. wind speed (y-axis).
+            Default is True.
+
+        Returns
+        -------
+        R : ndarray
+            Exceedance probabilities at each value of *x*.
+        fig : matplotlib.figure.Figure or None
+            Figure object; None if *plot* is False.
+        ax : matplotlib.axes.Axes or None
+            Axes object; None if *plot* is False.
+        """
         R = 1-self.cdf(x)
 
         if plot:
@@ -332,6 +840,16 @@ class speed_and_direction_dist:
         return R,fig,ax
 
     def mean_direction(self):
+        """Compute the circular mean wind direction.
+
+        Uses the complex-exponential method to correctly handle the 0°/360°
+        wraparound: mean = angle(Σᵢ pᵢ · exp(j · θᵢ · π/180)) · 180/π.
+
+        Returns
+        -------
+        float
+            Mean wind direction in degrees, in the range [0°, 360°).
+        """
         # Circular mean of the wind direction
         m = np.angle( np.sum(np.exp(np.pi/180 * self.azimuth_bin_centers * 1j) * self.probabilities))
         if m > 0:  # the angle returns the principal value between -np.pi and np.pi, but I want 0 to 360
@@ -339,6 +857,39 @@ class speed_and_direction_dist:
         else: 
             return 360 + m*180/np.pi
 class turbine:
+    """Wind turbine model storing power and thrust performance curves.
+
+    All internally stored quantities use SI units (W, N, m, m/s). Conversion
+    to other units is handled at the point of output (``get_power``, ``plot``,
+    ``get_aep``, ``export_to_sam_format``).
+
+    Performance data can be loaded from the NREL turbine-models library via
+    ``import_nrel_power_curve``, or set manually via ``set_performance``.
+
+    Attributes
+    ----------
+    wind_speeds : list or ndarray
+        Wind speeds for the performance curve (m/s).
+    power : list or ndarray
+        Electrical power output at each wind speed (W).
+    Cp : list or ndarray
+        Power coefficient at each wind speed (dimensionless).
+    Ct : list or ndarray
+        Thrust coefficient at each wind speed (dimensionless).
+    thrust : list or ndarray
+        Rotor thrust force at each wind speed (N).
+    cut_in_speed : float or None
+        Minimum wind speed for power generation (m/s).
+    cut_out_speed : float or None
+        Maximum operating wind speed (m/s).
+    rotor_diameter : float or None
+        Rotor diameter (m).
+    hub_height : float or None
+        Hub height above ground (m).
+    rated_power : float or None
+        Nameplate (rated) power output (W).
+    """
+
     def __init__(self):
         self.wind_speeds = []       # m/s
         self.power = []             # W
@@ -353,6 +904,25 @@ class turbine:
 
     def set_performance(self,wind_speeds,power=None,Cp=None,
                         Ct=None,thrust=None):
+        """Manually set turbine performance curves.
+
+        Use this as an alternative to ``import_nrel_power_curve`` when loading
+        data from a custom source. All arrays should be the same length and
+        ordered by ascending wind speed.
+
+        Parameters
+        ----------
+        wind_speeds : array-like
+            Wind speeds (m/s).
+        power : array-like or None, optional
+            Electrical power at each wind speed (W).
+        Cp : array-like or None, optional
+            Power coefficient at each wind speed (dimensionless).
+        Ct : array-like or None, optional
+            Thrust coefficient at each wind speed (dimensionless).
+        thrust : array-like or None, optional
+            Rotor thrust force at each wind speed (N).
+        """
         self.wind_speeds = wind_speeds
         self.power = power
         self.Cp = Cp
@@ -360,6 +930,27 @@ class turbine:
         self.thrust = thrust
     
     def import_nrel_power_curve(self,turbine_name):
+        """Import turbine specifications from the NREL turbine-models library.
+
+        Populates all turbine attributes from the NREL dataset. Power is
+        converted from kW (NREL convention) to W internally. If thrust or Ct
+        data are absent in the dataset, a warning is printed and the
+        corresponding attributes remain empty.
+
+        Parameters
+        ----------
+        turbine_name : str
+            Turbine model name as it appears in the NREL turbine-models
+            database (e.g. ``'NREL_2p3_116'``). Case-sensitive.
+
+        Returns
+        -------
+        None
+            Populates ``self.wind_speeds``, ``self.power``, ``self.Cp``,
+            ``self.Ct``, ``self.thrust``, ``self.cut_in_speed``,
+            ``self.cut_out_speed``, ``self.rotor_diameter``,
+            ``self.hub_height``, and ``self.rated_power`` in place.
+        """
         # From https://github.com/NREL/turbine-models
 
         turb = Turbines()
@@ -396,6 +987,26 @@ class turbine:
             print('No thrust data. Skipping import.')
                                                
     def plot(self,ax=None,nonzero_only=False,power_units='MW',plt_kwargs={}):
+        """Plot the turbine power curve.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes to plot on. If None, a new figure and axes are created.
+        nonzero_only : bool, optional
+            If True, plot only the tabulated data points (no interpolation).
+            If False (default), interpolate a smooth curve from 0 m/s to
+            slightly beyond the maximum tabulated wind speed.
+        power_units : {'W', 'kW', 'MW'}, optional
+            Units for the power axis. Default is ``'MW'``.
+        plt_kwargs : dict, optional
+            Additional keyword arguments forwarded to ``ax.plot``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object containing the plot.
+        """
         if ax is None:
             fig,ax = plt.subplots()
         
@@ -423,6 +1034,25 @@ class turbine:
         return ax
 
     def get_power(self,wind_speed,power_units = 'W'):
+        """Interpolate power output at given wind speed(s).
+
+        Uses linear interpolation on the tabulated power curve. Power is set
+        to zero for wind speeds at or below ``cut_in_speed`` or strictly
+        above ``cut_out_speed``.
+
+        Parameters
+        ----------
+        wind_speed : float or ndarray
+            Wind speed(s) in m/s.
+        power_units : {'W', 'kW', 'MW'}, optional
+            Units for the returned power. Default is ``'W'``.
+
+        Returns
+        -------
+        float or ndarray
+            Power output in the requested units. Returns the same type
+            (scalar or array) as the input.
+        """
         y = np.interp(wind_speed,self.wind_speeds,self.power)
 
         if power_units.lower() == 'w':
@@ -444,10 +1074,63 @@ class turbine:
         return scale*y
         
     def get_thrust(self,wind_speed):
+        """Interpolate rotor thrust at a given wind speed.
+
+        Parameters
+        ----------
+        wind_speed : float
+            Wind speed in m/s.
+
+        Returns
+        -------
+        float or None
+            Thrust force in N if *wind_speed* is within the operating range
+            [``cut_in_speed``, ``cut_out_speed``); otherwise returns None.
+        """
         if (wind_speed >= self.cut_in_speed) and (wind_speed < self.cut_out_speed):
             return np.interp(wind_speed,self.wind_speeds,self.thrust)
 
     def get_aep(self,dist,ref_height=None,alpha=None,units='MW',quad_kwargs={},dt=1.0,dist_type='weibull',wind_profile='power_law'):
+        """Compute the Annual Energy Production (AEP) of the turbine.
+
+        Integrates the product of the power curve and the wind speed PDF over
+        [0, ``cut_out_speed``], then scales by the number of time steps per year:
+
+        AEP = ∫₀^v_cut_out P(v) · f(v) dv · dt · (8760 / dt)
+
+        If *ref_height* is provided and differs from the hub height, the
+        distribution is first scaled to hub height using the power law.
+
+        Parameters
+        ----------
+        dist : scipy.stats frozen distribution
+            Wind speed probability distribution.
+        ref_height : float or None, optional
+            Height (m) at which *dist* was measured. If None, the distribution
+            is assumed to already be at hub height. Default is None.
+        alpha : float or None, optional
+            Power law exponent required when *ref_height* is not None.
+        units : {'W', 'kW', 'MW'}, optional
+            Output energy units. For example, ``'MW'`` returns MWh.
+            Default is ``'MW'``.
+        quad_kwargs : dict, optional
+            Extra keyword arguments forwarded to ``scipy.integrate.quad``.
+        dt : float, optional
+            Time-step size in hours (used only in the year-scaling factor).
+            Default is 1.0 (hourly).
+        dist_type : {'weibull', 'rayleigh'}, optional
+            Distribution family, used by ``change_height``. Default is
+            ``'weibull'``.
+        wind_profile : {'power_law'}, optional
+            Height extrapolation model. Currently only ``'power_law'`` is
+            supported. Default is ``'power_law'``.
+
+        Returns
+        -------
+        float
+            Annual energy production in the units implied by *units*
+            (e.g. MWh when ``units='MW'``).
+        """
         # dt is in hours. Default is 1.0 for hourly data.
     
         num_dt_per_year = int(8760/dt) # number of time steps per year
@@ -469,6 +1152,25 @@ class turbine:
         return res[0]*dt*num_dt_per_year # AEP in MWh
 
     def export_to_sam_format(self,name):
+        """Format turbine data as a SAM wind turbine CSV line.
+
+        Produces a single comma-separated string compatible with the SAM wind
+        turbine library format. Wind speeds and power values within each field
+        are separated by pipe characters (``|``). Power is converted from W to
+        kW for the SAM format.
+
+        Parameters
+        ----------
+        name : str
+            Turbine model name written into the first field.
+
+        Returns
+        -------
+        str
+            CSV-formatted string:
+            ``name, rated_power_kW, rotor_diameter_m, unknown,
+            ws1|ws2|..., power_kW1|power_kW2|...``
+        """
         out = ",".join([name,str(self.rated_power/1000),str(self.rotor_diameter),'unknown'])
         
         wind_speeds = [f'{v}' for v in self.wind_speeds]
@@ -487,6 +1189,41 @@ def initial_layout_rectangle(x_bnds:list,
                              n_grid_points:int = None,
                              rotation:float = 0.0,
                              placed_turbine_positions:list[np.ndarray]=None):
+    """Generate an initial wind farm layout within a rectangular bounding box.
+
+    Uses a greedy "farthest-first" algorithm: at each step the next turbine is
+    placed at the candidate grid point that is farthest (in Euclidean distance)
+    from all already-placed turbines. This heuristic spreads turbines across
+    the domain but does not enforce a minimum separation distance.
+
+    If *rotation* is non-zero the layout is rotated about the centre of the
+    bounding box and then scaled to fit back inside the box.
+
+    Parameters
+    ----------
+    x_bnds : list of [float, float]
+        ``[x_min, x_max]`` bounds of the bounding box in metres.
+    y_bnds : list of [float, float]
+        ``[y_min, y_max]`` bounds of the bounding box in metres.
+    n_turbines : int
+        Number of turbines to place.
+    n_grid_points : int or None, optional
+        Total number of candidate grid points. Defaults to
+        ``100 * n_turbines`` if None. The grid is approximately square
+        (``floor(√n)`` × ``ceil(√n)`` points).
+    rotation : float, optional
+        Rotation angle of the layout grid in degrees. Default is 0.0 (no
+        rotation).
+    placed_turbine_positions : list of ndarray or None, optional
+        Pre-positioned turbines (each an array of shape (2,)) to treat as
+        already placed before the greedy selection begins. If None, the first
+        turbine is chosen randomly from the grid.
+
+    Returns
+    -------
+    ndarray, shape (n_turbines, 2)
+        Array of turbine (x, y) positions in metres.
+    """
     
     rotation = np.deg2rad(rotation)
     
@@ -530,6 +1267,27 @@ def initial_layout_rectangle(x_bnds:list,
     return np.array(points)
 
 def _add_min_squared_distance(points,grid):
+    """Select the next turbine position using the farthest-first criterion.
+
+    For each remaining candidate grid point, computes the minimum squared
+    Euclidean distance to any already-placed turbine. The candidate with the
+    largest such minimum distance is selected as the next turbine location and
+    removed from the grid.
+
+    Parameters
+    ----------
+    points : list of ndarray
+        Already-placed turbine positions, each of shape (2,).
+    grid : ndarray, shape (n_candidates, 2)
+        Remaining candidate grid points.
+
+    Returns
+    -------
+    points : list of ndarray
+        Updated list with the newly selected turbine appended.
+    grid : ndarray, shape (n_candidates - 1, 2)
+        Candidate grid with the selected point removed.
+    """
     M = len(points)
     d2 = np.inf*np.ones((grid.shape[0],M))
     for ii,p in enumerate(points):
@@ -543,7 +1301,28 @@ def _add_min_squared_distance(points,grid):
     return points,grid
 
 def rotation_matrix(ϕ,homogeneous=False):
-    
+    """Construct a 2-D rotation matrix.
+
+    R = [[cos ϕ, −sin ϕ],
+         [sin ϕ,  cos ϕ]]
+
+    Rotates a column vector counter-clockwise by *ϕ* radians in the x–y plane.
+
+    Parameters
+    ----------
+    ϕ : float
+        Rotation angle in radians.
+    homogeneous : bool, optional
+        If True, return a 3×3 homogeneous rotation matrix (the rotation is
+        embedded in the upper-left 2×2 block with a 1 in the bottom-right
+        corner). Default is False (returns a 2×2 matrix).
+
+    Returns
+    -------
+    ndarray, shape (2, 2) or (3, 3)
+        Rotation matrix.
+    """
+
     if homogeneous:
         R = np.array([[np.cos(ϕ),-np.sin(ϕ),0],[np.sin(ϕ),np.cos(ϕ),0],
                       [0,0,1]])
