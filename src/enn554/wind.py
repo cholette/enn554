@@ -115,6 +115,15 @@ class merra_wind_speed_data:
                                 minute=df.get('minute', 0),  # use 0 if not present
                                 second=df.get('second', 0),  # use 0 if not present
                                 ))
+        
+        if self.time_reference == 'UTC':
+            print(f"Time reference is UTC.")
+            df['Timestamp'] = df['Timestamp'].dt.tz_localize('UTC')
+        else:
+            print(f"""Time reference is {self.time_reference}. Assuming timestamps are in local 
+                      time with a fixed UTC offset (no DST). If this is from NASA POWER, this is 
+                      likley incorrect since LST in the DAV is Local Solar Time.""")
+
         df = df.drop(['YEAR','MO','DY','HR'],axis=1)
         # NASA POWER names all shortwave irradiance parameters with 'SW'
         # (e.g. ALLSKY_SFC_SW_DWN, ALLSKY_SFC_SW_DNI, CLRSKY_SFC_SW_DWN)
@@ -122,6 +131,12 @@ class merra_wind_speed_data:
         df = df.drop(solar_cols, axis=1)
         df = df[['Timestamp',*df.columns[:-1]]]
         self.data = df
+
+    def utc_to_lst(self, lst_offset: int):
+        utc_str = f"{lst_offset:+d}:00"
+        print(utc_str)
+        self.time_reference = 'LST'
+        self.data['Timestamp'] = self.data['Timestamp'].dt.tz_convert(utc_str)
 
     def add_speed_at_height(self,
                         heights: list[int],
@@ -356,6 +371,24 @@ def power_law(ws: float | np.ndarray, height: float, new_height: float, alpha: f
         Wind speed at *new_height* (m/s).
     """
     return ws * (new_height/height)**alpha
+
+def mean_direction(wd: np.ndarray):
+    """Compute the circular mean wind direction.
+
+    Uses the complex-exponential method to correctly handle the 0°/360°
+    wraparound: mean = angle(1/N Σᵢ· exp(j · θᵢ · π/180)) · 180/π.
+
+    Returns
+    -------
+    float
+        Mean wind direction in degrees, in the range [0°, 360°).
+    """
+    # Circular mean of the wind direction
+    m = np.angle( np.sum(np.exp(np.pi/180 * wd * 1j)) / len(wd))
+    if m > 0:  # the angle returns the principal value between -np.pi and np.pi, but I want 0 to 360
+        return m * 180/np.pi
+    else: 
+        return 360 + m*180/np.pi
 
 def logarithmic(ws: float | np.ndarray, height: float, new_height: float, z0: float):
     """Extrapolate wind speed to a new height using the logarithmic wind profile.
@@ -593,7 +626,7 @@ class speed_and_direction_dist:
     def __init__(self, type: str | None = None, shapes: list[float] = [], scales: list[float] = [], n_az_bins: int | None = None, probabilities: list[float] = []):
 
         assert type is not None, 'Must provide a distribution type'
-        assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be "weibull" or "rayleigh'
+        assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be weibull or rayleigh'
         if type.lower() == 'weibull':
             self.dists = [stats.weibull_min(shape,scale=scale) for shape,scale in zip(shapes,scales)]
         elif type.lower() == 'rayleigh':
@@ -778,17 +811,13 @@ class speed_and_direction_dist:
         """
         return fsolve(lambda x: self.cdf(x)-p,self.mean_speed())
 
-    def fit(self, direction: np.ndarray, speed: np.ndarray, az_edges: np.ndarray | None = None, plot: bool = False, hist_kwargs: dict = {}, fit_kwargs: dict = {}, handles: tuple | None = None):
+    def fit(self, direction: np.ndarray, speed: np.ndarray, az_edges: np.ndarray | None = None, 
+            plot: bool = False, hist_kwargs: dict = {}, fit_kwargs: dict = {}):
         """Fit per-sector wind speed distributions to observational data.
 
         Bins wind observations by direction sector, computes sector
         probabilities from observation counts, and fits a Weibull distribution
         to the wind speeds within each sector using ``speed_fit``.
-
-        .. warning::
-            This method **appends** to ``self.dists`` without clearing it
-            first. Calling ``fit`` more than once on the same object will
-            duplicate the distributions, producing incorrect results.
 
         Parameters
         ----------
@@ -800,11 +829,15 @@ class speed_and_direction_dist:
             Azimuth bin edges to use instead of those set at construction.
             Only applied if ``self.azimuth_bin_edges`` is empty.
         plot : bool, optional
-            Plotting is not yet implemented; reserved for future use.
+            If True, produce one figure per sector showing a density-normalised
+            histogram of the sector's wind speeds with the fitted PDF overlaid.
+            Empty sectors (no observations) are skipped. Default is False.
         hist_kwargs : dict, optional
-            Reserved for future plotting use.
+            Keyword arguments forwarded to ``matplotlib.axes.Axes.hist`` for
+            each sector plot. Ignored when *plot* is False.
         fit_kwargs : dict, optional
-            Reserved for future plotting use.
+            Keyword arguments forwarded to the PDF line plot for each sector.
+            Ignored when *plot* is False.
         handles : tuple or None, optional
             Reserved for future plotting use.
 
@@ -814,6 +847,7 @@ class speed_and_direction_dist:
             Updates ``self.probabilities`` and ``self.dists`` in place.
         """
         # data is [direction,speed]
+        self.dists = []
         assert (self.azimuth_bin_edges is not []) or (az_edges is not None), 'Must provide azimuth bin edges either in object or as a keyword argument to the fitting'
 
         if self.azimuth_bin_edges is []:
@@ -824,12 +858,26 @@ class speed_and_direction_dist:
         dir,sp = direction,speed
         dir_bins = np.digitize(dir,self.azimuth_bin_edges,right=True)
         dir_bins[dir_bins == len(self.azimuth_bin_edges)] = 0 # wrap around to zero
-        prob_hat = np.bincount(dir_bins,minlength=len(self.probabilities))
+        prob_hat = np.bincount(dir_bins,minlength=len(self.azimuth_bin_edges))
         self.probabilities = prob_hat/np.sum(prob_hat)
 
-        for ii in np.unique(dir_bins):
-            d = speed_fit(sp[dir_bins==ii],plot=False)
+        n_sectors = len(self.azimuth_bin_edges)
+        for ii in range(n_sectors):
+            mask = dir_bins == ii
+            if mask.any():
+                if plot:
+                    d, fig, ax = speed_fit(sp[mask], plot=True, hist_kwargs=hist_kwargs, fit_kwargs=fit_kwargs)
+                    ax.set_title(f'Sector {ii}: {self.azimuth_bin_centers[ii]:.1f}°  (n={mask.sum()},p={self.probabilities[ii]*100:.1f}%)')
+                else:
+                    d = speed_fit(sp[mask], plot=False)
+            else:
+                d = stats.weibull_min(2, scale=1)  # placeholder; prob=0 so it never contributes
             self.dists.append(d)
+
+    def print_params(self):
+        """Print the fitted parameters of each directional sector distribution."""
+        for ii,d in enumerate(self.dists):
+            print(f'Sector {ii} ({self.azimuth_bin_centers[ii]:.1f}°): p={self.probabilities[ii]*100:.1f}%, c={d.kwds["scale"]:.2f}, k={d.args[0]:.2f}')
 
     def wind_speed_curve(self, x: np.ndarray, hours_per_year: float = 8760, plot: bool = True):
         """Compute (and optionally plot) the wind speed exceedance curve.
@@ -1123,7 +1171,10 @@ class turbine:
         if (wind_speed >= self.cut_in_speed) and (wind_speed < self.cut_out_speed):
             return np.interp(wind_speed,self.wind_speeds,self.thrust)
 
-    def get_aep(self, dist: Any, ref_height: float | None = None, alpha: float | None = None, units: str = 'MW', quad_kwargs: dict = {}, dt: float = 1.0, dist_type: str = 'weibull', wind_profile: str = 'power_law'):
+    def get_aep(self, dist: Any, ref_height: float | None = None, alpha: float | None = None, 
+                units: str = 'MW', quad_kwargs: dict = {}, dt: float = 1.0, dist_type: str = 'weibull', 
+                wind_profile: str = 'power_law'):
+        
         """Compute the Annual Energy Production (AEP) of the turbine.
 
         Integrates the product of the power curve and the wind speed PDF over
@@ -1139,8 +1190,9 @@ class turbine:
         dist : scipy.stats frozen distribution
             Wind speed probability distribution.
         ref_height : float or None, optional
-            Height (m) at which *dist* was measured. If None, the distribution
-            is assumed to already be at hub height. Default is None.
+            Height (m) at which *dist* was measured. If None, or if equal to
+            the turbine hub height, the distribution is used directly without
+            height correction. Default is None.
         alpha : float or None, optional
             Power law exponent required when *ref_height* is not None.
         units : {'W', 'kW', 'MW'}, optional
@@ -1168,16 +1220,18 @@ class turbine:
     
         num_dt_per_year = int(8760/dt) # number of time steps per year
 
-        if ref_height is None:
-            print('No reference height provided. Assuming wind speed distribution is at the hub height.')
-            integrand = lambda x: self.get_power(x,power_units=units)*dist.pdf(x)    
+        if ref_height is None or ref_height == self.hub_height:
+            if ref_height is None:
+                print('No reference height provided. Assuming wind speed distribution is at the hub height.')
+            else:
+                print(f'Reference height ({ref_height} m) matches hub height. Using distribution directly.')
+            integrand = lambda x: self.get_power(x, power_units=units) * dist.pdf(x)
         else:
             if wind_profile.lower() == 'power_law':
                 assert alpha is not None, 'Must provide alpha for power law model'
                 print(f"Changing height from {ref_height} to {self.hub_height}m using power law with alpha = {alpha}")
-                dist_at_hub_height = change_height(dist,ref_height,self.hub_height,alpha,dist_type)
-                # integrand = lambda x: self.get_power(np.array([x*(self.hub_height/ref_height)**alpha]),power_units=units) * dist.pdf(x)
-                integrand = lambda x: self.get_power(np.array([x]),power_units=units) * dist_at_hub_height.pdf(x)
+                dist_at_hub_height = change_height(dist, ref_height, self.hub_height, alpha, dist_type)
+                integrand = lambda x: self.get_power(np.array([x]), power_units=units) * dist_at_hub_height.pdf(x)
             else:
                 raise ValueError('Invalid height model. Only power_law implemented in this method so far.')
 
