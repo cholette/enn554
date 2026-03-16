@@ -9,6 +9,7 @@ from windrose import WindroseAxes
 import pandas as pd
 from turbine_models.parser import Turbines
 import csv
+from typing import Any
 
 # References
 # [1] Wind Energy Explained, 1st ed. John Wiley & Sons, Ltd, 2009. doi: 10.1002/9781119994367.
@@ -38,6 +39,10 @@ class merra_wind_speed_data:
         Date range string parsed from the CSV header.
     average_elevation : str or None
         Site elevation string parsed from the CSV header.
+    time_reference : {'LST', 'UTC'} or None
+        Time reference reported in the NASA POWER header. ``'LST'`` means the
+        timestamps are in Local Standard Time (a fixed UTC offset — no DST);
+        ``'UTC'`` means timestamps are in Coordinated Universal Time.
     data : pandas.DataFrame or None
         Imported time-series data with a ``Timestamp`` column.
     """
@@ -48,9 +53,10 @@ class merra_wind_speed_data:
         self.longitude = None
         self.date_range = None
         self.average_elevation = None
+        self.time_reference = None  # 'LST' or 'UTC' as reported in the NASA POWER header
         self.data = None
 
-    def import_data(self,merra_single_point_csv):
+    def import_data(self,merra_single_point_csv: str):
         """Import a MERRA-2 single-point CSV file exported from NASA POWER.
 
         Parses the custom NASA POWER header (lines up to and including
@@ -66,10 +72,11 @@ class merra_wind_speed_data:
         -------
         None
             Populates ``self.latitude``, ``self.longitude``,
-            ``self.average_elevation``, and ``self.data`` in place.
+            ``self.average_elevation``, ``self.time_reference``, and
+            ``self.data`` in place.
         """
         file = merra_single_point_csv
-        
+
         # read header
         with open(file,'r') as f:
             reader = csv.reader(f)
@@ -78,19 +85,25 @@ class merra_wind_speed_data:
                 header_count += 1
                 if row and row[0] == '-END HEADER-':
                     break
-                
+
                 if "location" in row[0].lower():
                     r_split = row[0].split()
                     islat = [('latitude' in r.lower()) for r in r_split]
                     if any(islat):
                         self.latitude = float(r_split[islat.index(True)+1])
-                    
+
                     islon = [('longitude' in r.lower()) for r in r_split]
                     if any(islon):
                         self.longitude = float(r_split[islon.index(True)+1])
-                
+
                 if "elevation" in row[0].lower():
                     self.average_elevation = row[0].split('=')[-1]
+
+                # The Dates line ends with "in LST" or "in UTC"
+                if "dates" in row[0].lower():
+                    tokens = row[0].split()
+                    if tokens[-1].upper() in ('LST', 'UTC'):
+                        self.time_reference = tokens[-1].upper()
 
         # read the rest
         df = pd.read_csv(file,skiprows=header_count)
@@ -103,15 +116,19 @@ class merra_wind_speed_data:
                                 second=df.get('second', 0),  # use 0 if not present
                                 ))
         df = df.drop(['YEAR','MO','DY','HR'],axis=1)
+        # NASA POWER names all shortwave irradiance parameters with 'SW'
+        # (e.g. ALLSKY_SFC_SW_DWN, ALLSKY_SFC_SW_DNI, CLRSKY_SFC_SW_DWN)
+        solar_cols = [c for c in df.columns if 'SW' in c]
+        df = df.drop(solar_cols, axis=1)
         df = df[['Timestamp',*df.columns[:-1]]]
         self.data = df
 
     def add_speed_at_height(self,
-                        heights:list[int],
-                        z0=None,
-                        alpha=None,
-                        model="power_law",
-                        plot=False):
+                        heights: list[int],
+                        z0: float | None = None,
+                        alpha: float | None = None,
+                        model: str = "power_law",
+                        plot: bool = False):
         """Extrapolate wind speed from 50 m to one or more target heights.
 
         Uses either the power law or the logarithmic wind profile model.
@@ -230,7 +247,8 @@ class merra_wind_speed_data:
         print(f'z0 = {z0:.3e}m')
         return z0
     
-    def export_to_sam_csv(self,site_timezone,filename:str):
+    def export_to_sam_csv(self,utc_offset: int, file_name: str,
+                          date_range: list | None = None):
         """Export the wind data to a SAM-compatible CSV file.
 
         Writes a single-row header followed by the time-series data in the
@@ -246,15 +264,21 @@ class merra_wind_speed_data:
 
         Unit conversions applied:
 
-        * Pressure: kPa → Pa (multiply by 1000).
+        * Pressure: kPa → Pa.
 
         Parameters
         ----------
-        site_timezone : str
-            Timezone string understood by pandas / pytz (e.g. ``'Australia/Brisbane'``).
-            Written to both ``Site Timezone`` and ``Data Timezone`` header fields.
-        filename : str or path-like
+        utc_offset : int
+            UTC offset in hours for the site (e.g. ``10`` for AEST, ``-7`` for
+            MST). NASA POWER LST data uses a fixed offset with no DST, so an
+            integer offset is the appropriate representation. Written to both
+            ``Site Timezone`` and ``Data Timezone`` header fields.
+        file_name : str or path-like
             Output file path for the SAM CSV.
+        date_range : two-element array-like of datetime-like, optional
+            ``[start, end]`` bounds (inclusive) used to slice ``self.data``
+            before export. Compared against the ``Timestamp`` column.
+            If ``None`` (default), all rows are exported.
 
         Returns
         -------
@@ -264,41 +288,50 @@ class merra_wind_speed_data:
         # See SAM CSV Format for Wind for more details on format.
 
         # header
-        row1 = ['Site Timezone',site_timezone,
-                'Data Timezone',site_timezone,
+        row1 = ['Site Timezone',utc_offset,
+                'Data Timezone',utc_offset,
                 'Latitude',self.latitude,
                 'Longitude',self.longitude,
                 'Elevation',self.average_elevation]
         row1 = [str(r) for r in row1]
         row1 = ','.join(row1)
-        
+
+        df2 = self.data.copy()
+
+        # optional date range filter
+        if date_range is not None:
+            mask = (df2['Timestamp'] >= date_range[0]) & (df2['Timestamp'] <= date_range[1])
+            df2 = df2.loc[mask]
+
         # rename wind speed and direction columns
-        heights = [name[2:-1] for name in self.data.columns if 'WS' in name]
-        df2 = self.data.rename(columns={f'WS{h}M':f'wind speed at {h}m (m/s)' for h in heights})
-        df2.rename(columns={f'WD{h}M':f'wind direction at {h}m (degrees)' for h in heights},inplace=True)
-        df2['PS']  = df2['PS'] * 1000 # convert from kPa to Pa
+        heights = [name[2:-1] for name in df2.columns if 'WS' in name]
+        df2 = df2.rename(columns={f'WS{h}M':f'wind speed at {h}m (m/s)' for h in heights})
+        df2 = df2.rename(columns={f'WD{h}M':f'wind direction at {h}m (degrees)' for h in heights})
+        df2['PS'] = df2['PS'] * 1000  # convert from kPa to Pa
 
         print("Warning: Arbitrarily setting pressure data to be at 10m.")
-        df2.rename(columns={'PS':'air pressure at 10m (Pa)'},inplace=True)
+        df2 = df2.rename(columns={'PS':'air pressure at 10m (Pa)'})
 
-        print("Warning: Temperature at 10m is not available in MERRA-2 data. Using temperature at 10m instead.")
-        df2.rename(columns={'T2M':'air temperature at 10m (C)'},inplace=True)
-               
+        print("Warning: Temperature at 10m is not available in MERRA-2 data. Using temperature at 2m instead.")
+        df2 = df2.rename(columns={'T2M':'air temperature at 10m (C)'})
+
         # add back columns for year, month, day, hour, minute if not there
-        def prepend(c,v): 
-            if c not in df2.columns: 
+        def prepend(c,v):
+            if c not in df2.columns:
                 df2.insert(0,c,v)
         prepend('Minute',df2.Timestamp.dt.minute)
         prepend('Hour',df2.Timestamp.dt.hour)
         prepend('Day',df2.Timestamp.dt.day)
         prepend('Month',df2.Timestamp.dt.month)
         prepend('Year',df2.Timestamp.dt.year)
-        
-        with open(filename,'w',newline='') as f:
-            f.write(row1+'\n')
-            df2.to_csv(f,header=True,index=False)        
 
-def power_law(ws,height,new_height,alpha):
+        df2 = df2.drop(columns='Timestamp')
+
+        with open(file_name,'w',newline='') as f:
+            f.write(row1+'\n')
+            df2.to_csv(f,header=True,index=False)
+
+def power_law(ws: float | np.ndarray, height: float, new_height: float, alpha: float):
     """Extrapolate wind speed to a new height using the power law profile.
 
     ws_new = ws · (new_height / height)^alpha
@@ -324,7 +357,7 @@ def power_law(ws,height,new_height,alpha):
     """
     return ws * (new_height/height)**alpha
 
-def logarithmic(ws,height,new_height,z0):
+def logarithmic(ws: float | np.ndarray, height: float, new_height: float, z0: float):
     """Extrapolate wind speed to a new height using the logarithmic wind profile.
 
     ws_new = ws · ln(new_height / z0) / ln(height / z0)
@@ -351,7 +384,7 @@ def logarithmic(ws,height,new_height,z0):
     """
     return ws * log(new_height/z0)/log(height/z0)
     
-def speed_fit(data,plot=False,type='Weibull',hist_kwargs={},fit_kwargs={},handles=None):
+def speed_fit(data: np.ndarray, plot: bool = False, type: str = 'Weibull', hist_kwargs: dict = {}, fit_kwargs: dict = {}, handles: tuple | None = None):
     """Fit a Weibull or Rayleigh distribution to wind speed data.
 
     The location parameter is fixed at zero (``floc=0``) so the distribution
@@ -415,7 +448,7 @@ def speed_fit(data,plot=False,type='Weibull',hist_kwargs={},fit_kwargs={},handle
     else:
         return dist
 
-def change_height(dist,height_old,height_new,alpha,type='weibull'):
+def change_height(dist: Any, height_old: float, height_new: float, alpha: float, type: str = 'weibull'):
     """Scale a wind speed distribution to a new hub height using the power law.
 
     Only the scale parameter of the distribution is modified; the shape
@@ -456,7 +489,7 @@ def change_height(dist,height_old,height_new,alpha,type='weibull'):
     else:
         raise ValueError('Invalid distribution type. Must be "weibull" or "rayleigh')
 
-def wind_rose(direction,speed,num_bins=16,s_units=None):
+def wind_rose(direction: np.ndarray, speed: np.ndarray, num_bins: int = 16, s_units: str | None = None):
     """Plot a wind rose (polar frequency histogram) for wind speed and direction.
 
     Each bar shows the frequency of winds from that direction sector; bar
@@ -487,7 +520,7 @@ def wind_rose(direction,speed,num_bins=16,s_units=None):
     ax.legend(title=f'Wind speed {s_units}',loc='best')
     return ax
 
-def power_cdf(dist,power_curve,n_bins=10,power_units='W'):
+def power_cdf(dist: Any, power_curve: Any, n_bins: int = 10, power_units: str = 'W'):
     """Compute the cumulative distribution function of turbine power output.
 
     Discretises the wind speed distribution into *n_bins* equally spaced
@@ -557,7 +590,7 @@ class speed_and_direction_dist:
         Probability weight for each sector. Should sum to 1.
     """
 
-    def __init__(self,type=None,shapes=[],scales=[],n_az_bins=None,probabilities=[]):
+    def __init__(self, type: str | None = None, shapes: list[float] = [], scales: list[float] = [], n_az_bins: int | None = None, probabilities: list[float] = []):
 
         assert type is not None, 'Must provide a distribution type'
         assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be "weibull" or "rayleigh'
@@ -577,7 +610,7 @@ class speed_and_direction_dist:
         self.height = None
         self.type = type.lower()
 
-    def set_height(self,height):
+    def set_height(self, height: float):
         """Record the reference height of the wind speed distributions.
 
         Must be called before ``change_height`` so the scaling factor can be
@@ -590,7 +623,7 @@ class speed_and_direction_dist:
         """
         self.height = height
 
-    def change_height(self,new_height,alpha):
+    def change_height(self, new_height: float, alpha: float):
         """Scale all directional sector distributions to a new height in place.
 
         Uses the power law to adjust the scale parameter of each sector's
@@ -618,7 +651,7 @@ class speed_and_direction_dist:
             for ii,d in enumerate(self.dists):
                 self.dists[ii] = change_height(d,self.height,new_height,alpha,self.type)
 
-    def rvs(self,N=1):
+    def rvs(self, N: int = 1):
         """Draw random (direction, speed) samples from the joint distribution.
 
         First samples a directional sector from the multinomial defined by
@@ -665,7 +698,7 @@ class speed_and_direction_dist:
 
         return np.array(probs),np.array(scales),np.array(shapes)
 
-    def pdf(self,x):
+    def pdf(self, x: float | np.ndarray):
         """Evaluate the marginal wind speed probability density function.
 
         Computes the mixture PDF by summing each sector's PDF weighted by its
@@ -683,7 +716,7 @@ class speed_and_direction_dist:
         """
         return np.sum([self.probabilities[ii]*d.pdf(x) for ii,d in enumerate(self.dists)],axis=0)
 
-    def cdf(self,x):
+    def cdf(self, x: float | np.ndarray):
         """Evaluate the marginal wind speed cumulative distribution function.
 
         Computes the mixture CDF: F(x) = Σᵢ pᵢ · Fᵢ(x).
@@ -727,7 +760,7 @@ class speed_and_direction_dist:
         """
         return np.sum([self.probabilities[ii]*(d.var()+d.mean()**2) for ii,d in enumerate(self.dists)]) - self.mean_speed()**2  # see https://en.wikipedia.org/wiki/Mixture_distribution#Moments
 
-    def ppf(self,p):
+    def ppf(self, p: float):
         """Compute the percent point function (inverse CDF) of the wind speed.
 
         Finds v such that CDF(v) = p using numerical root-finding
@@ -745,7 +778,7 @@ class speed_and_direction_dist:
         """
         return fsolve(lambda x: self.cdf(x)-p,self.mean_speed())
 
-    def fit(self,direction,speed,az_edges=None, plot=False,hist_kwargs={},fit_kwargs={},handles=None):
+    def fit(self, direction: np.ndarray, speed: np.ndarray, az_edges: np.ndarray | None = None, plot: bool = False, hist_kwargs: dict = {}, fit_kwargs: dict = {}, handles: tuple | None = None):
         """Fit per-sector wind speed distributions to observational data.
 
         Bins wind observations by direction sector, computes sector
@@ -798,7 +831,7 @@ class speed_and_direction_dist:
             d = speed_fit(sp[dir_bins==ii],plot=False)
             self.dists.append(d)
 
-    def wind_speed_curve(self,x,hours_per_year=8760,plot=True):
+    def wind_speed_curve(self, x: np.ndarray, hours_per_year: float = 8760, plot: bool = True):
         """Compute (and optionally plot) the wind speed exceedance curve.
 
         Returns the probability that the wind speed exceeds each value in *x*,
@@ -902,8 +935,8 @@ class turbine:
         self.hub_height = None      # m
         self.rated_power = None     # W
 
-    def set_performance(self,wind_speeds,power=None,Cp=None,
-                        Ct=None,thrust=None):
+    def set_performance(self, wind_speeds: np.ndarray, power: np.ndarray | None = None, Cp: np.ndarray | None = None,
+                        Ct: np.ndarray | None = None, thrust: np.ndarray | None = None):
         """Manually set turbine performance curves.
 
         Use this as an alternative to ``import_nrel_power_curve`` when loading
@@ -929,7 +962,7 @@ class turbine:
         self.Ct = Ct
         self.thrust = thrust
     
-    def import_nrel_power_curve(self,turbine_name):
+    def import_nrel_power_curve(self, turbine_name: str):
         """Import turbine specifications from the NREL turbine-models library.
 
         Populates all turbine attributes from the NREL dataset. Power is
@@ -986,7 +1019,7 @@ class turbine:
         else:
             print('No thrust data. Skipping import.')
                                                
-    def plot(self,ax=None,nonzero_only=False,power_units='MW',plt_kwargs={}):
+    def plot(self, ax: Any | None = None, nonzero_only: bool = False, power_units: str = 'MW', plt_kwargs: dict = {}):
         """Plot the turbine power curve.
 
         Parameters
@@ -1033,7 +1066,7 @@ class turbine:
         ax.set_xlabel('Wind speed [m/s]')
         return ax
 
-    def get_power(self,wind_speed,power_units = 'W'):
+    def get_power(self, wind_speed: float | np.ndarray, power_units: str = 'W'):
         """Interpolate power output at given wind speed(s).
 
         Uses linear interpolation on the tabulated power curve. Power is set
@@ -1073,7 +1106,7 @@ class turbine:
 
         return scale*y
         
-    def get_thrust(self,wind_speed):
+    def get_thrust(self, wind_speed: float):
         """Interpolate rotor thrust at a given wind speed.
 
         Parameters
@@ -1090,7 +1123,7 @@ class turbine:
         if (wind_speed >= self.cut_in_speed) and (wind_speed < self.cut_out_speed):
             return np.interp(wind_speed,self.wind_speeds,self.thrust)
 
-    def get_aep(self,dist,ref_height=None,alpha=None,units='MW',quad_kwargs={},dt=1.0,dist_type='weibull',wind_profile='power_law'):
+    def get_aep(self, dist: Any, ref_height: float | None = None, alpha: float | None = None, units: str = 'MW', quad_kwargs: dict = {}, dt: float = 1.0, dist_type: str = 'weibull', wind_profile: str = 'power_law'):
         """Compute the Annual Energy Production (AEP) of the turbine.
 
         Integrates the product of the power curve and the wind speed PDF over
@@ -1151,7 +1184,7 @@ class turbine:
         res = quad(integrand,0,self.cut_out_speed,**quad_kwargs) # integrate from 0 to cut out speed
         return res[0]*dt*num_dt_per_year # AEP in MWh
 
-    def export_to_sam_format(self,name):
+    def export_to_sam_format(self, name: str):
         """Format turbine data as a SAM wind turbine CSV line.
 
         Produces a single comma-separated string compatible with the SAM wind
@@ -1266,7 +1299,7 @@ def initial_layout_rectangle(x_bnds:list,
 
     return np.array(points)
 
-def _add_min_squared_distance(points,grid):
+def _add_min_squared_distance(points: list, grid: np.ndarray):
     """Select the next turbine position using the farthest-first criterion.
 
     For each remaining candidate grid point, computes the minimum squared
@@ -1300,7 +1333,7 @@ def _add_min_squared_distance(points,grid):
     
     return points,grid
 
-def rotation_matrix(ϕ,homogeneous=False):
+def rotation_matrix(ϕ: float, homogeneous: bool = False):
     """Construct a 2-D rotation matrix.
 
     R = [[cos ϕ, −sin ϕ],

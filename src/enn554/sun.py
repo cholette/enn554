@@ -6,6 +6,8 @@ from datetime import datetime, timezone, timedelta
 from .math import cosd, sind, acosd
 from IPython.display import display, Markdown
 from calendar import isleap
+import pandas as pd
+import csv
 from ipywidgets import interact
 import ipywidgets as widgets
 from .constants import h,c,kB,σ
@@ -648,7 +650,201 @@ def plane_of_array_irradiance(standard_clock_times,DNI,GHI,φ,L,L_tz,β,γ,
 
         if clip_aoi_greater_than_90 and cAOI < 0.0:
             g = 0.0
-        
+
         G_POA.append(g)
-        
+
     return G_POA
+
+
+class merra_solar_data:
+    """Container for MERRA-2 / CERES solar data downloaded from NASA POWER.
+
+    Imports single-point CSV exports from the NASA POWER Data Access Viewer and
+    provides methods to export data in SAM-compatible solar resource format.
+
+    Typical MERRA-2 / CERES columns after import:
+        ``ALLSKY_SFC_SW_DWN`` – all-sky GHI (Wh/m²)
+        ``ALLSKY_SFC_SW_DNI`` – all-sky DNI (Wh/m²)
+        ``ALLSKY_SFC_SW_DIFF`` – all-sky DHI (Wh/m²)
+        ``T2M``               – air temperature at 2 m (°C)
+        ``PS``                – surface pressure (kPa)
+        ``WS10M``             – wind speed at 10 m (m/s)
+        ``WD10M``             – wind direction at 10 m (degrees)
+        ``WS50M``             – wind speed at 50 m (m/s)
+        ``WD50M``             – wind direction at 50 m (degrees)
+
+    Attributes
+    ----------
+    data_source_url : str
+        URL of the NASA POWER data access viewer.
+    latitude : float or None
+        Site latitude in degrees (positive north).
+    longitude : float or None
+        Site longitude in degrees (positive east of Greenwich).
+    date_range : str or None
+        Date range string parsed from the CSV header.
+    average_elevation : float or None
+        Site elevation in metres parsed from the CSV header.
+    time_reference : {'LST', 'UTC'} or None
+        Time reference reported in the NASA POWER header. ``'LST'`` means the
+        timestamps are in Local Standard Time (a fixed UTC offset — no DST);
+        ``'UTC'`` means timestamps are in Coordinated Universal Time.
+    data : pandas.DataFrame or None
+        Imported time-series data with a ``Timestamp`` column.
+    """
+
+    def __init__(self) -> None:
+        self.data_source_url = "https://power.larc.nasa.gov/data-access-viewer/"
+        self.latitude = None
+        self.longitude = None
+        self.date_range = None
+        self.average_elevation = None  # float, in metres
+        self.time_reference = None     # 'LST' or 'UTC' as reported in the NASA POWER header
+        self.data = None
+
+    def import_data(self, merra_single_point_csv: str) -> None:
+        """Import a MERRA-2 single-point CSV file exported from NASA POWER.
+
+        Parses the custom NASA POWER header (lines up to and including
+        ``-END HEADER-``) to extract site metadata, then reads the remaining
+        rows as a time-series DataFrame with a ``Timestamp`` column.
+        Clear-sky irradiance columns (``CLRSKY_*``) are dropped at import
+        as they are not used in solar analysis or SAM export.
+
+        Parameters
+        ----------
+        merra_single_point_csv : str or path-like
+            Path to the NASA POWER CSV export file.
+
+        Returns
+        -------
+        None
+            Populates ``self.latitude``, ``self.longitude``,
+            ``self.average_elevation``, ``self.time_reference``,
+            ``self.date_range``, and ``self.data`` in place.
+        """
+        file = merra_single_point_csv
+
+        # read header
+        with open(file, 'r') as f:
+            reader = csv.reader(f)
+            header_count = 0
+            for row in reader:
+                header_count += 1
+                if row and row[0] == '-END HEADER-':
+                    break
+
+                if "location" in row[0].lower():
+                    r_split = row[0].split()
+                    islat = [('latitude' in r.lower()) for r in r_split]
+                    if any(islat):
+                        self.latitude = float(r_split[islat.index(True)+1])
+
+                    islon = [('longitude' in r.lower()) for r in r_split]
+                    if any(islon):
+                        self.longitude = float(r_split[islon.index(True)+1])
+
+                if "elevation" in row[0].lower():
+                    # e.g. "...= 4.72 meters" → 4.72
+                    self.average_elevation = float(row[0].split('=')[-1].split()[0])
+
+                # The Dates line ends with "in LST" or "in UTC"
+                if "dates" in row[0].lower():
+                    tokens = row[0].split()
+                    if tokens[-1].upper() in ('LST', 'UTC'):
+                        self.time_reference = tokens[-1].upper()
+                    # extract the date range string, e.g. "01/01/2015 through 01/01/2025"
+                    self.date_range = row[0].split(':', 1)[-1].rsplit(' in ', 1)[0].strip()
+
+        # read the rest
+        df = pd.read_csv(file, skiprows=header_count)
+        df['Timestamp'] = pd.to_datetime(dict(
+            year=df['YEAR'],
+            month=df['MO'],
+            day=df['DY'],
+            hour=df['HR'],
+        ))
+        df = df.drop(['YEAR', 'MO', 'DY', 'HR'], axis=1)
+
+        # Drop clear-sky irradiance columns — not used in analysis or SAM export.
+        # NASA POWER names all clear-sky parameters with 'CLRSKY'.
+        clrsky_cols = [c for c in df.columns if 'CLRSKY' in c]
+        df = df.drop(clrsky_cols, axis=1)
+
+        df = df[['Timestamp', *[c for c in df.columns if c != 'Timestamp']]]
+        self.data = df
+
+    def export_to_sam_csv(self, utc_offset: int, filename: str,
+                          date_range: list | None = None) -> None:
+        """Export the solar data to a SAM-compatible CSV file.
+
+        Writes a two-row site header followed by the time-series data in the
+        format expected by NREL's System Advisor Model (SAM) solar resource
+        CSV format. The SAM solar format uses a pair of header rows: the first
+        contains field names, the second contains their values.
+
+        Only the columns required by SAM are written: GHI, DNI, DHI,
+        Temperature, Wind Speed, and Pressure.
+
+        Unit conversions applied:
+
+        * Pressure: kPa → mbar (multiply by 10).
+
+        Parameters
+        ----------
+        utc_offset : int
+            UTC offset in hours for the site (e.g. ``10`` for AEST). NASA
+            POWER LST data uses a fixed offset with no DST, so an integer
+            offset is the appropriate representation.
+        filename : str or path-like
+            Output file path for the SAM CSV.
+        date_range : two-element array-like of datetime-like, optional
+            ``[start, end]`` bounds (inclusive) used to slice ``self.data``
+            before export. Compared against the ``Timestamp`` column.
+            If ``None`` (default), all rows are exported.
+
+        Returns
+        -------
+        None
+            Writes the file to disk.
+        """
+        # SAM solar resource format requires two header rows:
+        # row 1 — field names, row 2 — corresponding values.
+        row1 = 'Longitude, Latitude, Timezone, Elevation'
+        row2 = f'{self.longitude},{self.latitude},{utc_offset},{self.average_elevation}'
+
+        df2 = self.data.copy()
+
+        # optional date range filter
+        if date_range is not None:
+            mask = (df2['Timestamp'] >= date_range[0]) & (df2['Timestamp'] <= date_range[1])
+            df2 = df2.loc[mask]
+
+        # pressure: kPa → mbar (×10)
+        df2['PS'] = df2['PS'] * 10
+
+        # add date columns from Timestamp (no Minute — not required by SAM solar format)
+        df2 = df2.assign(
+            Year=df2['Timestamp'].dt.year,
+            Month=df2['Timestamp'].dt.month,
+            Day=df2['Timestamp'].dt.day,
+            Hour=df2['Timestamp'].dt.hour,
+        )
+
+        # rename to SAM column names and select only the required output columns
+        rename_map = {
+            'ALLSKY_SFC_SW_DWN': 'GHI',
+            'ALLSKY_SFC_SW_DNI': 'DNI',
+            'ALLSKY_SFC_SW_DIFF': 'DHI',
+            'T2M': 'Temperature',
+            'WS10M': 'Wind Speed',
+            'PS': 'Pressure',
+        }
+        output_cols = ['Year', 'Month', 'Day', 'Hour',
+                       'GHI', 'DNI', 'DHI', 'Temperature', 'Wind Speed', 'Pressure']
+        df2 = df2.rename(columns=rename_map)[output_cols]
+
+        with open(filename, 'w', newline='') as f:
+            f.write(row1 + '\n')
+            f.write(row2 + '\n')
+            df2.to_csv(f, header=True, index=False)

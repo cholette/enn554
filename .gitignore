@@ -10,3 +10,4 @@ docs/
 *.egg
 *.ipynb_checkpoints/
 CLAUDE.md
+.claude/
