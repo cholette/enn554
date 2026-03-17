@@ -7,7 +7,6 @@ from numpy import log
 import matplotlib.pyplot as plt
 from windrose import WindroseAxes
 import pandas as pd
-from turbine_models.parser import Turbines
 import csv
 from typing import Any
 
@@ -1033,6 +1032,13 @@ class turbine:
             ``self.hub_height``, and ``self.rated_power`` in place.
         """
         # From https://github.com/NREL/turbine-models
+        try:
+            from turbine_models.parser import Turbines
+        except ImportError as e:
+            raise ImportError(
+                "turbine_models is required for this method but could not be imported. "
+                "Install it manually if available."
+            ) from e
 
         turb = Turbines()
         specs = turb.specs(turbine_name)

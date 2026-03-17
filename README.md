@@ -49,6 +49,8 @@ python -m pip install -e .[all]
 ```
 if you want the developer tools. This is only necessary if you plan on contributing to the repository.
 
+An optional dependency is to install the turbine models from ``https://github.com/NatLabRockies/turbine-models`` via the experimental install procedure suggested for this repo.
+
 ### Create the ```data``` and ```outputs``` directories
 In the main folder of the repo, create these folders. The contents of the ``data`` folder will need to be periodically updated with files from the Canvas site. 
 

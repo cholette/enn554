@@ -49,7 +49,9 @@ dependencies = [
     "shapely",
     "geopandas",
     "pysolar",
-    "openpyxl"
+    "openpyxl",
+    "Pillow",
+    "contextily"
 ]
 
 # -------- Optional environments --------
