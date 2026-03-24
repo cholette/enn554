@@ -1,5 +1,5 @@
 import scipy.stats as stats
-from scipy.optimize import fsolve,minimize_scalar
+from scipy.optimize import fsolve,minimize_scalar, root_scalar
 from scipy.optimize import minimize,LinearConstraint
 from scipy.integrate import quad
 import numpy as np
@@ -1423,3 +1423,25 @@ def rotation_matrix(ϕ: float, homogeneous: bool = False):
         R = np.array([[np.cos(ϕ),-np.sin(ϕ)],[np.sin(ϕ),np.cos(ϕ)]])
     
     return R
+
+def cp_max(λ):
+
+    a1 = 0.25
+    fun = lambda a: λ**2 - (1-a)*(1-4*a)**2 / (1-3*a)
+    res = root_scalar(fun,bracket=(0.25,1.0/3.0-1e-6))
+    a2 = res.root
+    
+    integrand = lambda a: ( (1-a)*(1-2*a)*(1-4*a) / (1-3*a) ) **2
+    val,err =  quad(integrand,a=a1,b=a2)
+    result = {'Cp_max': 24.0/λ**2 * val, 'a2': a2, 'error':err}
+    return result
+
+def betz_blade(λ,α,C_lift,number_of_blades=3,r=np.linspace(1e-6,1,100)):
+    ϕ = np.atan(2/(3*r*λ))
+    c_norm = (8*np.pi)/(3*number_of_blades*C_lift*λ)*np.sin(ϕ)
+    θp =  ϕ - np.deg2rad(α)
+    result = {  'r/R':r,
+                'c/R':c_norm,
+                'angle_of_relative_wind':np.rad2deg(ϕ),
+                'section_pitch':np.rad2deg(θp)}
+    return result
