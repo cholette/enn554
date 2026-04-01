@@ -447,8 +447,19 @@ def speed_fit(data: np.ndarray, plot: bool = False, type: str = 'Weibull', hist_
         Only returned when *plot* is True.
     ax : matplotlib.axes.Axes
         Only returned when *plot* is True.
+
+    Notes
+    -----
+    For a fitted Weibull distribution, the shape parameter k and scale
+    parameter c (Lecture Notes §2.2, Eqs. 1–2) can be recovered via::
+
+        k = dist.args[0]        # shape
+        c = dist.kwds['scale']  # scale
+
+    The mean wind speed is then Ū = c · Γ(1 + 1/k) (Eq. 2).
+    For a Rayleigh fit (k = 2 fixed), only the scale c is fitted (§2.3).
     """
-    
+
     assert type.lower() is not None, 'Must provide a distribution type'
     assert type.lower() in ['weibull','rayleigh'], 'Invalid distribution type. Must be "weibull" or "rayleigh'
     if type.lower() == 'weibull':
@@ -615,7 +626,8 @@ class speed_and_direction_dist:
     shapes : list of float
         Weibull shape parameters (k) for each sector. Must be empty for Rayleigh.
     scales : list of float
-        Scale parameters (λ) for each sector (m/s).
+        Scale parameters (c) for each sector (m/s).  Controls the
+        characteristic wind speed of each sector (Ū = c · Γ(1 + 1/k)).
     n_az_bins : int
         Number of equally spaced azimuth sectors.
     probabilities : list of float
@@ -1184,12 +1196,13 @@ class turbine:
         """Compute the Annual Energy Production (AEP) of the turbine.
 
         Integrates the product of the power curve and the wind speed PDF over
-        [0, ``cut_out_speed``], then scales by the number of time steps per year:
+        [0, ``cut_out_speed``] and scales by hours per year
+        (Lecture Notes §6.4, Eq. 40):
 
-        AEP = ∫₀^v_cut_out P(v) · f(v) dv · dt · (8760 / dt)
+        AEP = 8760 ∫₀^{v_cut} P(v) · f(v) dv
 
         If *ref_height* is provided and differs from the hub height, the
-        distribution is first scaled to hub height using the power law.
+        distribution is first scaled to hub height using the power law (§4.2).
 
         Parameters
         ----------
@@ -1425,6 +1438,46 @@ def rotation_matrix(ϕ: float, homogeneous: bool = False):
     return R
 
 def cp_max(λ):
+    """Maximum power coefficient considering wake rotation, as a function of tip-speed ratio.
+
+    Numerically integrates the optimised differential power coefficient expression
+    derived from the annular stream-tube / BEM analysis (Lecture Notes §8.2.2, Eq. 70):
+
+        C_{p,max} = (24 / λ²) ∫_{a₁}^{a₂} [(1−a)(1−2a)(1−4a) / (1−3a)]² da
+
+    The lower limit a₁ = 1/4 corresponds to λ_r = 0.  The upper limit a₂ is the
+    axial induction factor at the blade tip, found by solving (Eq. 71):
+
+        λ² = (1 − a₂)(1 − 4a₂)² / (1 − 3a₂)
+
+    As λ → ∞ the result converges to the Betz limit of 16/27 ≈ 0.5926.  At low
+    tip-speed ratios the wake-rotation correction gives a tighter (lower) bound.
+
+    Parameters
+    ----------
+    λ : float
+        Tip-speed ratio (dimensionless), Ω R / u_∞.
+
+    Returns
+    -------
+    dict
+        ``'Cp_max'`` : float
+            Maximum achievable power coefficient at the given tip-speed ratio.
+        ``'a2'`` : float
+            Axial induction factor at the blade tip for maximum power.
+        ``'error'`` : float
+            Estimated absolute integration error from ``scipy.integrate.quad``.
+
+    Notes
+    -----
+    The Betz limit (16/27) is recovered only in the limit λ → ∞.  For practical
+    tip-speed ratios (λ ≈ 5–10) wake rotation reduces C_{p,max} noticeably.
+
+    References
+    ----------
+    Lecture notes §8.2.2, Eqs. 70–71.
+    *Wind Energy Explained*, 1st ed., Wiley, 2009.
+    """
 
     a1 = 0.25
     fun = lambda a: λ**2 - (1-a)*(1-4*a)**2 / (1-3*a)
@@ -1437,6 +1490,69 @@ def cp_max(λ):
     return result
 
 def betz_blade(λ,α,C_lift,number_of_blades=3,r=np.linspace(1e-6,1,100)):
+    """Betz-optimal blade geometry (chord and pitch) for a HAWT rotor.
+
+    Computes the spanwise chord and section pitch distributions that maximise
+    power under the following simplifying assumptions (Lecture Notes §8.2.3):
+
+    * No wake rotation  (a′ = 0)
+    * Drag neglected    (C_D = 0)
+    * No tip losses
+    * Axial induction factor set to the Betz optimum  a = 1/3
+
+    At each radial station the angle of relative wind is (Eq. 94):
+
+        tan φ = 2 / (3 λ_r),    λ_r = (r/R) · λ
+
+    The normalised chord is (Eq. 95):
+
+        c/R = (8π / (3 B C_L λ)) sin φ
+
+    and the section pitch angle is (Eq. 78):
+
+        θ_p = φ − α
+
+    Parameters
+    ----------
+    λ : float
+        Design tip-speed ratio, Ω R / u_∞.
+    α : float
+        Design angle of attack in degrees; should be chosen to maximise C_L/C_D
+        for the selected aerofoil.
+    C_lift : float
+        Lift coefficient C_L at the design angle of attack.
+    number_of_blades : int, optional
+        Number of rotor blades B.  Default is 3.
+    r : array-like, optional
+        Normalised radial positions r/R ∈ (0, 1] at which to evaluate the blade
+        geometry.  Values of exactly 0 are avoided as tan φ diverges at the root.
+        Default is 100 linearly spaced points from ≈ 0 to 1.
+
+    Returns
+    -------
+    dict
+        ``'r/R'`` : ndarray
+            Normalised radial positions (same as input ``r``).
+        ``'c/R'`` : ndarray
+            Normalised chord length at each radial station.
+        ``'angle_of_relative_wind'`` : ndarray
+            Angle of relative wind φ in degrees at each station.
+        ``'section_pitch'`` : ndarray
+            Section pitch angle θ_p = φ − α in degrees at each station.
+
+    Notes
+    -----
+    All geometry is non-dimensionalised by rotor radius R.  Multiply ``c/R``
+    by R to recover physical chord lengths.
+
+    The section pitch angle θ_p is measured from the plane of rotation to the
+    chord line; it decreases (and can go negative) towards the tip.
+
+    References
+    ----------
+    Lecture notes §8.2.3, Eqs. 78, 94–95.
+    *Wind Energy Explained*, 1st ed., Wiley, 2009.
+    """
     ϕ = np.atan(2/(3*r*λ))
     c_norm = (8*np.pi)/(3*number_of_blades*C_lift*λ)*np.sin(ϕ)
     θp =  ϕ - np.deg2rad(α)
