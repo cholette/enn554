@@ -11,3 +11,6 @@ docs/
 *.ipynb_checkpoints/
 CLAUDE.md
 .claude/
+coretrace*
+soltrace/*
+.vscode/*
