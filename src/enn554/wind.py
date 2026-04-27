@@ -848,7 +848,6 @@ class speed_and_direction_dist:
             each sector plot. Ignored when *plot* is False.
         fit_kwargs : dict, optional
             Keyword arguments forwarded to the PDF line plot for each sector.
-            Ignored when *plot* is False.
         handles : tuple or None, optional
             Reserved for future plotting use.
 
@@ -880,7 +879,7 @@ class speed_and_direction_dist:
                     d, fig, ax = speed_fit(sp[mask], plot=True, hist_kwargs=hist_kwargs, fit_kwargs=fit_kwargs)
                     ax.set_title(f'Sector {ii}: {self.azimuth_bin_centers[ii]:.1f}°  (n={mask.sum()},p={self.probabilities[ii]*100:.1f}%)')
                 else:
-                    d = speed_fit(sp[mask], plot=False)
+                    d = speed_fit(sp[mask], plot=False,fit_kwargs=fit_kwargs)
             else:
                 d = stats.weibull_min(2, scale=1)  # placeholder; prob=0 so it never contributes
             self.dists.append(d)
